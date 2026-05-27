@@ -53,6 +53,34 @@
   var reconnTimer = null;
   var playbackStarted = false;
 
+  // ── Watchdog — remplace l'event "stalled" trop agressif ──────────────────
+  // Sur Android WebView, "stalled" se déclenche toutes les 3s pour les flux
+  // MPEG-TS live (comportement normal du buffer MSE), ce qui provoquait un
+  // redémarrage en boucle toutes les ~1 seconde.
+  // Le watchdog vérifie que currentTime avance vraiment avant de reconnecter.
+  var WATCHDOG_MS = 12000;
+  var watchdogTimer = null;
+  var lastCurrentTime = -1;
+
+  function resetWatchdog() {
+    clearWatchdog();
+    if (!playbackStarted) return;
+    watchdogTimer = setTimeout(function() {
+      var ct = v.currentTime;
+      if (ct === lastCurrentTime) {
+        scheduleReconnect(); // vrai gel : currentTime n'a pas bougé en 12s
+      } else {
+        lastCurrentTime = ct;
+        resetWatchdog();
+      }
+    }, WATCHDOG_MS);
+  }
+
+  function clearWatchdog() {
+    if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   function showPoster(){ if(logo){ poster.classList.remove('hidden'); } }
   function hidePoster(){ poster.classList.add('hidden'); }
   function showSpinner(t){ spinner.classList.remove('hidden'); label.textContent = t; }
@@ -114,8 +142,18 @@
       player.attachMediaElement(v);
       player.load();
       player.on(mpegts.Events.ERROR, function(errType, errDetail){
-        console.warn('mpegts error:', errType, errDetail);
-        scheduleReconnect();
+        // Ignorer les erreurs réseau bénignes (fetch interrompu, stall court)
+        // Seulement reconnecter sur les vraies erreurs fatales
+        var fatal = (errType === 'MediaError') ||
+                    (errType === 'NetworkError' &&
+                     (errDetail === 'NetworkConnectionRefused' ||
+                      errDetail === 'NetworkUnrecoverableEarlyEof'));
+        if (fatal) {
+          console.warn('mpegts fatal error:', errType, errDetail);
+          scheduleReconnect();
+        } else {
+          console.log('mpegts non-fatal:', errType, errDetail);
+        }
       });
       var tryPlay = v.play();
       if (tryPlay && tryPlay.catch) tryPlay.catch(function(){});
@@ -135,12 +173,14 @@
   }
 
   function destroyPlayer(){
+    clearWatchdog();
     if (reconnTimer){ clearTimeout(reconnTimer); reconnTimer = null; }
     if (player){
       try { player.unload(); player.detachMediaElement(); player.destroy(); } catch(e){}
       player = null;
     }
     playbackStarted = false;
+    lastCurrentTime = -1;
   }
 
   function scheduleReconnect(){
@@ -148,7 +188,9 @@
     reconnects++;
     showSpinner('Reconnexion ' + reconnects + '…');
     showPoster();
-    var delay = Math.min(1000 * reconnects, 6000);
+    // Délai exponentiel : min 2s (au lieu de 1s) → 8s max
+    // L'ancien délai de 1s créait une boucle de redémarrage visible
+    var delay = Math.min(2000 + 1000 * (reconnects - 1), 8000);
     reconnTimer = setTimeout(function(){
       reconnTimer = null;
       destroyPlayer();
@@ -174,10 +216,30 @@
     hidePoster();
     reconnects = 0;
     playbackStarted = true;
+    lastCurrentTime = v.currentTime;
+    resetWatchdog(); // démarre la surveillance seulement après la première image
   });
-  v.addEventListener('waiting', function(){ showSpinner('Mise en mémoire…'); });
-  v.addEventListener('stalled', function(){ if(playbackStarted) scheduleReconnect(); });
-  v.addEventListener('error',   function(){ scheduleReconnect(); });
+
+  v.addEventListener('timeupdate', function(){
+    lastCurrentTime = v.currentTime; // permet au watchdog de détecter un vrai gel
+  });
+
+  v.addEventListener('waiting', function(){
+    showSpinner('Mise en mémoire…');
+    // PAS de reconnexion — "waiting" est normal pendant le buffering live
+  });
+
+  // "stalled" intentionnellement supprimé :
+  // Sur Android WebView, cet event se déclenche toutes les 3s pour les flux
+  // MPEG-TS live → boucle de redémarrage toutes les ~1s.
+  // Le watchdog ci-dessus gère les vrais blocages avec un délai de 12s.
+
+  v.addEventListener('error', function(){
+    var err = v.error;
+    // Ignorer MEDIA_ERR_ABORTED (code 1) = arrêt volontaire lors d'un changement de chaîne
+    if (err && err.code === 1) return;
+    scheduleReconnect();
+  });
 
   if (url) start(url); else label.textContent = 'Aucun flux';
 

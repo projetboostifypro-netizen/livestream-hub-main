@@ -62,6 +62,8 @@ public class PlayerActivity extends AppCompatActivity {
         chEpg = findViewById(R.id.ch_epg);
         topOverlay = findViewById(R.id.top_overlay);
         bottomOverlay = findViewById(R.id.bottom_overlay);
+        // Accélération hardware : décode H.264/H.265 via GPU → pas de freeze
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         WebSettings ws = webView.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
@@ -69,6 +71,9 @@ public class PlayerActivity extends AppCompatActivity {
         ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         ws.setAllowFileAccess(true);
         ws.setAllowContentAccess(true);
+        // Désactiver le cache : garantit que player.html et mpegts.js sont
+        // toujours chargés depuis les assets (jamais une ancienne version en cache)
+        ws.setCacheMode(WebSettings.LOAD_NO_CACHE);
         webView.setBackgroundColor(0xFF000000);
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
