@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0B0D10">
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp"
+        android:gravity="center_horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Test de débit"
+            android:textColor="#FFFFFF"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Mesure la vitesse de téléchargement de votre connexion."
+            android:textColor="#9AA0A6"
+            android:textSize="12sp" />
+
+        <TextView android:id="@+id/speed"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="40dp"
+            android:text="0.00 Mbps"
+            android:textColor="#0AB1F0"
+            android:textSize="48sp"
+            android:textStyle="bold" />
+
+        <TextView android:id="@+id/status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="En attente…"
+            android:textColor="#9AA0A6"
+            android:textSize="13sp" />
+
+        <ProgressBar android:id="@+id/progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:max="100"
+            android:progress="0" />
+
+        <Button android:id="@+id/run"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="Lancer le test"
+            android:textColor="#FFFFFF"
+            android:background="#0AB1F0" />
+
+        <TextView android:id="@+id/result"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:padding="14dp"
+            android:text="Résultat : (en attente)"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:background="#0F1216" />
+
+        <TextView android:id="@+id/summary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:padding="14dp"
+            android:text="Résumé : —"
+            android:textColor="#C5C8CC"
+            android:textSize="13sp"
+            android:typeface="monospace"
+            android:background="#0F1216" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Log de la requête"
+            android:textColor="#9AA0A6"
+            android:textSize="12sp" />
+
+        <TextView android:id="@+id/log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:padding="12dp"
+            android:text="(vide)"
+            android:textColor="#C5C8CC"
+            android:textSize="11sp"
+            android:typeface="monospace"
+            android:background="#0F1216" />
+    </LinearLayout>
+</ScrollView>

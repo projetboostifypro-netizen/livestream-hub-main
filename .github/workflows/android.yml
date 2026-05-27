@@ -1,0 +1,65 @@
+name: Build Android APK
+
+on:
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        working-directory: android
+        shell: bash
+        run: |
+          set -o pipefail
+          COMMAND="gradle assembleDebug --no-daemon --stacktrace --info --warning-mode all"
+          echo "Commande exécutée : $COMMAND"
+          echo "Dossier de travail : $(pwd)"
+          echo "Version Java :"
+          java -version
+          echo "Version Gradle :"
+          gradle --version
+          echo "Fichiers Android présents :"
+          ls -la
+          echo "Début des logs Gradle complets"
+          $COMMAND 2>&1 | tee ../gradle-build-full.log
+
+      - name: Upload Gradle diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-diagnostics
+          if-no-files-found: warn
+          path: |
+            gradle-build-full.log
+            android/app/build/reports/
+            android/build/reports/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowIPTV-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK as a Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android/app/build/outputs/apk/debug/app-debug.apk

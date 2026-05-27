@@ -1,0 +1,21 @@
+<resources>
+    <style name="Theme.FlowIPTV" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#0AB1F0</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#0AB1F0</item>
+        <item name="colorOnPrimaryContainer">#FFFFFF</item>
+        <item name="colorSecondary">#0AB1F0</item>
+        <item name="colorOnSecondary">#FFFFFF</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:fontFamily">sans-serif-rounded</item>
+        <item name="fontFamily">sans-serif-rounded</item>
+    </style>
+
+    <style name="Theme.FlowIPTV.Splash" parent="Theme.FlowIPTV">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+    </style>
+</resources>

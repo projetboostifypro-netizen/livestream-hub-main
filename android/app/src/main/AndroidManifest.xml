@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="FLOW+"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/Theme.FlowIPTV">
+        <activity android:name=".SplashActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FlowIPTV.Splash">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".LoginActivity"
+            android:exported="false" />
+        <activity android:name=".MainActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".PlansActivity"
+            android:exported="false" />
+        <activity android:name=".CoinsActivity"
+            android:exported="false" />
+        <activity android:name=".AdminActivity"
+            android:exported="false" />
+        <activity android:name=".AdminApiKeyActivity"
+            android:exported="false" />
+        <activity android:name=".AdminPlansActivity"
+            android:exported="false" />
+        <activity android:name=".AdminPlaylistActivity"
+            android:exported="false" />
+        <activity android:name=".AdminVpsActivity"
+            android:exported="false" />
+        <activity android:name=".AdminRechargesActivity"
+            android:exported="false" />
+        <activity android:name=".AdminSubscriptionsActivity"
+            android:exported="false" />
+        <activity android:name=".TestDebitActivity"
+            android:exported="false" />
+        <activity android:name=".PlayerActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="sensorLandscape" />
+    </application>
+</manifest>

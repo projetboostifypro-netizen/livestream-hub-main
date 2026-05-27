@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>IPTV</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html,body{width:100%;height:100%;background:#000;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#fff;}
+  #stage{position:fixed;inset:0;background:#000;}
+  video{width:100%;height:100%;object-fit:contain;background:#000;display:block;}
+  #poster{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;transition:opacity .25s;}
+  #poster.hidden{opacity:0;pointer-events:none;}
+  #poster img{max-width:90%;max-height:80%;object-fit:contain;}
+  #overlay{position:fixed;left:0;right:0;bottom:0;padding:14px 16px 18px;
+    background:linear-gradient(transparent,#000c);display:flex;align-items:center;gap:10px;pointer-events:none;}
+  #spinner{width:22px;height:22px;border:3px solid #ffffff33;border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;}
+  #spinner.hidden{display:none;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  #label{font-size:13px;font-weight:600;opacity:.9;text-shadow:0 1px 2px #000;}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="v" playsinline autoplay muted></video>
+  <div id="poster"><img id="posterImg" alt=""/></div>
+  <div id="overlay">
+    <div id="spinner"></div>
+    <div id="label">Connexion…</div>
+  </div>
+</div>
+<script src="mpegts.js"></script>
+<script>
+(function(){
+  var v = document.getElementById('v');
+  var poster = document.getElementById('poster');
+  var posterImg = document.getElementById('posterImg');
+  var spinner = document.getElementById('spinner');
+  var label = document.getElementById('label');
+
+  var params = new URLSearchParams(location.search);
+  var url   = params.get('url') || '';
+  var name  = params.get('name') || '';
+  var logo  = params.get('logo') || '';
+
+  if (logo) { posterImg.src = logo; } else { poster.classList.add('hidden'); }
+  label.textContent = name ? ('Connexion · ' + name) : 'Connexion…';
+
+  v.muted = false;
+
+  var player = null;
+  var reconnects = 0;
+  var reconnTimer = null;
+  var playbackStarted = false;
+
+  function showPoster(){ if(logo){ poster.classList.remove('hidden'); } }
+  function hidePoster(){ poster.classList.add('hidden'); }
+  function showSpinner(t){ spinner.classList.remove('hidden'); label.textContent = t; }
+  function hideSpinner(){ spinner.classList.add('hidden'); label.textContent = name || ''; }
+
+  function isHls(u){ return /\.m3u8(\?|$)/i.test(u); }
+
+  // Résoudre les URLs relatives en absolues (nécessaire pour le Web Worker de mpegts.js)
+  function resolveUrl(u) {
+    if (!u) return u;
+    if (u.startsWith('http://') || u.startsWith('https://')) return u;
+    // URL relative — construire l'URL absolue depuis location
+    var base = location.protocol + '//' + location.host;
+    return base + (u.startsWith('/') ? u : '/' + u);
+  }
+
+  function startMpegTs(u){
+    if (!window.mpegts) { startNative(u); return; }
+    var supported = false;
+    try { supported = mpegts.isSupported(); } catch(e) {}
+
+    try {
+      player = mpegts.createPlayer(
+        { type: 'mpegts', url: u, isLive: true, hasAudio: true, hasVideo: true },
+        {
+          // ── CORRECTION PRINCIPALE ──────────────────────────────────────────
+          // enableWorker DOIT être false dans un WebView Android :
+          // le worker tente de charger depuis file:///android_asset/ via fetch(),
+          // ce qui échoue silencieusement → le demuxer ne reçoit jamais les données
+          // → vidéo gelée, son décalé, relance toutes les 3 secondes.
+          enableWorker: false,
+
+          // ── Latence live ───────────────────────────────────────────────────
+          liveBufferLatencyChasing: true,
+          liveSync: true,
+          liveBufferLatencyMaxLatency: 3.0,
+          liveBufferLatencyMinRemain: 0.5,
+          lazyLoadMaxDuration: 180,
+          lazyLoadRecoverDuration: 30,
+          deferLoadAfterSourceOpen: false,
+
+          // ── Stabilité buffer ───────────────────────────────────────────────
+          enableStashBuffer: true,
+          stashInitialSize: 384 * 1024,
+
+          // ── Correction désynchronisation audio/vidéo ───────────────────────
+          // Corrige les gaps de timestamps → élimine le son qui "recule"
+          fixAudioTimestampGap: true,
+
+          // ── Nettoyage automatique du SourceBuffer ──────────────────────────
+          // Évite les freezes mémoire sur les longs streams
+          autoCleanupSourceBuffer: true,
+          autoCleanupMaxBackwardDuration: 10,
+          autoCleanupMinBackwardDuration: 5,
+
+          headers: { 'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20' }
+        }
+      );
+      player.attachMediaElement(v);
+      player.load();
+      player.on(mpegts.Events.ERROR, function(errType, errDetail){
+        console.warn('mpegts error:', errType, errDetail);
+        scheduleReconnect();
+      });
+      var tryPlay = v.play();
+      if (tryPlay && tryPlay.catch) tryPlay.catch(function(){});
+    } catch(e) {
+      console.warn('mpegts.createPlayer failed:', e);
+      startNative(u);
+    }
+  }
+
+  function startNative(u){
+    try {
+      v.src = u;
+      v.load();
+      var p = v.play();
+      if (p && p.catch) p.catch(function(){});
+    } catch(e) {}
+  }
+
+  function destroyPlayer(){
+    if (reconnTimer){ clearTimeout(reconnTimer); reconnTimer = null; }
+    if (player){
+      try { player.unload(); player.detachMediaElement(); player.destroy(); } catch(e){}
+      player = null;
+    }
+    playbackStarted = false;
+  }
+
+  function scheduleReconnect(){
+    if (reconnTimer) return;
+    reconnects++;
+    showSpinner('Reconnexion ' + reconnects + '…');
+    showPoster();
+    var delay = Math.min(1000 * reconnects, 6000);
+    reconnTimer = setTimeout(function(){
+      reconnTimer = null;
+      destroyPlayer();
+      start(url);
+    }, delay);
+  }
+
+  function start(u){
+    destroyPlayer();
+    u = resolveUrl(u);
+    url = u;
+    showSpinner('Connexion…');
+    showPoster();
+    if (isHls(u)) {
+      startNative(u);
+    } else {
+      startMpegTs(u);
+    }
+  }
+
+  v.addEventListener('playing', function(){
+    hideSpinner();
+    hidePoster();
+    reconnects = 0;
+    playbackStarted = true;
+  });
+  v.addEventListener('waiting', function(){ showSpinner('Mise en mémoire…'); });
+  v.addEventListener('stalled', function(){ if(playbackStarted) scheduleReconnect(); });
+  v.addEventListener('error',   function(){ scheduleReconnect(); });
+
+  if (url) start(url); else label.textContent = 'Aucun flux';
+
+  // API exposée à Android (PlayerActivity.java l'appelle via evaluateJavascript)
+  window.IPTV = {
+    play: function(u, n, l){
+      url = u || ''; name = n || ''; logo = l || '';
+      label.textContent = name || '';
+      if (logo) { posterImg.src = logo; posterImg.onerror = function(){ poster.classList.add('hidden'); }; }
+      else { posterImg.removeAttribute('src'); }
+      reconnects = 0;
+      start(url);
+    },
+    stop: function(){
+      destroyPlayer();
+      try { v.removeAttribute('src'); v.load(); } catch(e){}
+    }
+  };
+})();
+</script>
+</body>
+</html>
