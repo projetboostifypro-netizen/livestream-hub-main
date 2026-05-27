@@ -1,42 +1,45 @@
 package com.flow.iptv;
 
-import android.content.Context;
 import android.content.Intent;
-import android.annotation.SuppressLint;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.widget.Toast;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
 import android.widget.TextView;
-import android.webkit.WebView;
-import android.webkit.WebSettings;
-import android.webkit.WebChromeClient;
-import android.webkit.WebViewClient;
 import androidx.annotation.NonNull;
 import androidx.annotation.OptIn;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.exoplayer.DefaultLoadControl;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.ui.PlayerView;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import com.bumptech.glide.Glide;
+import java.util.Collections;
 import java.util.List;
 
 @OptIn(markerClass = UnstableApi.class)
 public class PlayerActivity extends AppCompatActivity {
-    private WebView webView;
-    private boolean webReady = false;
-    private String pendingPlay = null;
+
+    private ExoPlayer player;
+    private PlayerView playerView;
     private TextView chName, chEpg;
     private View topOverlay, bottomOverlay;
     private List<Channel> channels;
     private int index;
     private RecyclerView switcher;
     private volatile boolean expired = false;
+    private int retryCount = 0;
+
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable hideOverlays = () -> setOverlaysVisible(false);
     private final Runnable epgTick = new Runnable() {
@@ -53,47 +56,28 @@ public class PlayerActivity extends AppCompatActivity {
     };
 
     @Override
-    @SuppressLint("SetJavaScriptEnabled")
     protected void onCreate(Bundle s) {
         super.onCreate(s);
         setContentView(R.layout.activity_player);
-        webView = findViewById(R.id.player_web);
-        chName = findViewById(R.id.ch_name);
-        chEpg = findViewById(R.id.ch_epg);
+
+        playerView = findViewById(R.id.player_view);
+        chName     = findViewById(R.id.ch_name);
+        chEpg      = findViewById(R.id.ch_epg);
         topOverlay = findViewById(R.id.top_overlay);
         bottomOverlay = findViewById(R.id.bottom_overlay);
-        // Accélération hardware : décode H.264/H.265 via GPU → pas de freeze
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        WebSettings ws = webView.getSettings();
-        ws.setJavaScriptEnabled(true);
-        ws.setDomStorageEnabled(true);
-        ws.setMediaPlaybackRequiresUserGesture(false);
-        ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        ws.setAllowFileAccess(true);
-        ws.setAllowContentAccess(true);
-        // Désactiver le cache : garantit que player.html et mpegts.js sont
-        // toujours chargés depuis les assets (jamais une ancienne version en cache)
-        ws.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        webView.setBackgroundColor(0xFF000000);
-        webView.setWebChromeClient(new WebChromeClient());
-        webView.setWebViewClient(new WebViewClient() {
-            @Override public void onPageFinished(WebView v, String u) {
-                webReady = true;
-                if (pendingPlay != null) { v.evaluateJavascript(pendingPlay, null); pendingPlay = null; }
-            }
-        });
-        webView.setOnClickListener(v -> toggleOverlays());
-        webView.loadUrl("file:///android_asset/player.html");
+
+        buildPlayer();
+
+        playerView.setOnClickListener(v -> toggleOverlays());
 
         channels = ChannelHolder.get();
         index = getIntent().getIntExtra("index", -1);
 
-        // Backwards-compat: legacy launches via extras.
         if (channels.isEmpty() || index < 0 || index >= channels.size()) {
-            String url = getIntent().getStringExtra("url");
+            String url  = getIntent().getStringExtra("url");
             String name = getIntent().getStringExtra("name");
             if (url != null) {
-                channels = java.util.Collections.singletonList(new Channel(name == null ? "" : name, "", url, null, null));
+                channels = Collections.singletonList(new Channel(name == null ? "" : name, "", url, null, null));
                 index = 0;
             } else {
                 finish();
@@ -110,9 +94,85 @@ public class PlayerActivity extends AppCompatActivity {
         scheduleHide();
     }
 
+    private void buildPlayer() {
+        // Buffer réduit pour IPTV live : démarre dès 1s en mémoire, max 8s
+        // Le buffer par défaut (50s) était la cause du "Mise en mémoire..." prolongé
+        DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                        3_000,   // minBufferMs : tampon minimum maintenu
+                        10_000,  // maxBufferMs : tampon maximum
+                        1_000,   // bufferForPlaybackMs : démarre à 1s
+                        2_000    // bufferForPlaybackAfterRebufferMs
+                )
+                .build();
+
+        DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
+                .setConnectTimeoutMs(10_000)
+                .setReadTimeoutMs(15_000)
+                .setAllowCrossProtocolRedirects(true);
+
+        player = new ExoPlayer.Builder(this)
+                .setLoadControl(loadControl)
+                .setMediaSourceFactory(new DefaultMediaSourceFactory(httpFactory))
+                .build();
+
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlayerError(@NonNull PlaybackException e) {
+                if (expired) return;
+                // Retry exponentiel : 2s, 4s, 8s, 8s max
+                long delay = Math.min(2_000L * (1L << Math.min(retryCount, 2)), 8_000L);
+                retryCount++;
+                ui.postDelayed(() -> {
+                    if (!isFinishing() && player != null) {
+                        player.prepare();
+                        player.play();
+                    }
+                }, delay);
+            }
+
+            @Override
+            public void onPlaybackStateChanged(int state) {
+                if (state == Player.STATE_READY) {
+                    retryCount = 0;
+                }
+            }
+        });
+
+        playerView.setPlayer(player);
+    }
+
+    private void startPlayback(int newIndex) {
+        if (newIndex < 0 || newIndex >= channels.size()) return;
+        if (expired) { redirectToDashboard(); return; }
+        int oldIndex = index;
+        index = newIndex;
+        retryCount = 0;
+
+        Channel c = channels.get(index);
+        setTitle(c.name);
+        chName.setText(c.name);
+        updateEpgLabel();
+
+        if (player != null) {
+            player.stop();
+            player.setMediaItem(MediaItem.fromUri(c.url));
+            player.prepare();
+            player.setPlayWhenReady(true);
+        }
+
+        if (switcher != null && switcher.getAdapter() != null) {
+            if (oldIndex >= 0 && oldIndex < channels.size()) switcher.getAdapter().notifyItemChanged(oldIndex);
+            switcher.getAdapter().notifyItemChanged(index);
+            switcher.smoothScrollToPosition(index);
+        }
+        scheduleHide();
+        checkSubscription();
+    }
+
     private void setOverlaysVisible(boolean v) {
         int vis = v ? View.VISIBLE : View.GONE;
-        if (topOverlay != null) topOverlay.setVisibility(vis);
+        if (topOverlay != null)    topOverlay.setVisibility(vis);
         if (bottomOverlay != null) bottomOverlay.setVisibility(vis);
     }
 
@@ -128,46 +188,6 @@ public class PlayerActivity extends AppCompatActivity {
         ui.postDelayed(hideOverlays, 4000);
     }
 
-    private void startPlayback(int newIndex) {
-        if (newIndex < 0 || newIndex >= channels.size()) return;
-        if (expired) { redirectToDashboard(); return; }
-        int oldIndex = index;
-        index = newIndex;
-        Channel c = channels.get(index);
-        setTitle(c.name);
-        chName.setText(c.name);
-        updateEpgLabel();
-
-        String js = "window.IPTV && window.IPTV.play("
-            + jsStr(c.url) + "," + jsStr(c.name) + "," + jsStr(c.logo) + ");";
-        if (webReady) webView.evaluateJavascript(js, null);
-        else pendingPlay = js;
-
-        if (switcher != null && switcher.getAdapter() != null) {
-            if (oldIndex >= 0 && oldIndex < channels.size()) switcher.getAdapter().notifyItemChanged(oldIndex);
-            switcher.getAdapter().notifyItemChanged(index);
-            switcher.smoothScrollToPosition(index);
-        }
-        scheduleHide();
-        // Vérifie l'abonnement immédiatement à chaque changement de chaîne
-        checkSubscription();
-    }
-
-    private static String jsStr(String s) {
-        if (s == null) return "''";
-        StringBuilder sb = new StringBuilder("'");
-        for (int i = 0; i < s.length(); i++) {
-            char ch = s.charAt(i);
-            if (ch == '\\' || ch == '\'' ) sb.append('\\').append(ch);
-            else if (ch == '\n') sb.append("\\n");
-            else if (ch == '\r') sb.append("\\r");
-            else if (ch < 0x20) sb.append(String.format("\\u%04x", (int) ch));
-            else sb.append(ch);
-        }
-        sb.append('\'');
-        return sb.toString();
-    }
-
     private void updateEpgLabel() {
         if (channels == null || index < 0 || index >= channels.size()) return;
         Channel c = channels.get(index);
@@ -178,30 +198,26 @@ public class PlayerActivity extends AppCompatActivity {
 
     @Override protected void onResume() {
         super.onResume();
+        if (player != null) player.setPlayWhenReady(true);
         ui.postDelayed(epgTick, 30_000);
-        // Vérifie immédiatement, puis périodiquement
         checkSubscription();
         ui.postDelayed(subCheck, 30_000);
     }
 
     @Override protected void onPause() {
         super.onPause();
+        if (player != null) player.setPlayWhenReady(false);
         ui.removeCallbacks(epgTick);
         ui.removeCallbacks(subCheck);
     }
 
-    @Override protected void onStop() {
-        super.onStop();
-        if (webView != null) {
-            try { webView.evaluateJavascript("window.IPTV && window.IPTV.stop();", null); } catch (Exception ignored) {}
-            webView.onPause();
-        }
-    }
-
     @Override protected void onDestroy() {
-        if (webView != null) {
-            try { webView.loadUrl("about:blank"); webView.removeAllViews(); webView.destroy(); } catch (Exception ignored) {}
-            webView = null;
+        ui.removeCallbacks(hideOverlays);
+        ui.removeCallbacks(epgTick);
+        ui.removeCallbacks(subCheck);
+        if (player != null) {
+            player.release();
+            player = null;
         }
         super.onDestroy();
     }
@@ -224,9 +240,7 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     private void redirectToDashboard() {
-        try {
-            if (webView != null) { webView.evaluateJavascript("window.IPTV && window.IPTV.stop();", null); }
-        } catch (Exception ignored) {}
+        if (player != null) { try { player.stop(); } catch (Exception ignored) {} }
         ui.removeCallbacks(subCheck);
         ui.removeCallbacks(epgTick);
         if (isFinishing()) return;
@@ -253,7 +267,7 @@ public class PlayerActivity extends AppCompatActivity {
         @Override public void onBindViewHolder(@NonNull SVH h, int pos) {
             Channel c = channels.get(pos);
             TextView name = h.itemView.findViewById(R.id.p_name);
-            TextView epg = h.itemView.findViewById(R.id.p_epg);
+            TextView epg  = h.itemView.findViewById(R.id.p_epg);
             ImageView logo = h.itemView.findViewById(R.id.p_logo);
             name.setText(c.name);
             String label = EPGStore.get().currentLabel(c.tvgId);
