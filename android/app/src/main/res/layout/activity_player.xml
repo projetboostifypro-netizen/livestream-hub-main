@@ -1,19 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:background="#000000"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <androidx.media3.ui.PlayerView
+    <VideoView
         android:id="@+id/player_view"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:layout_gravity="center"
         android:background="#000000"
-        android:keepScreenOn="true"
-        app:use_controller="false"
-        app:show_buffering="when_playing"
-        app:resize_mode="fit"/>
+        android:keepScreenOn="true"/>
 
     <LinearLayout
         android:id="@+id/top_overlay"

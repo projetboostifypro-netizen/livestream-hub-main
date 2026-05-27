@@ -1,6 +1,8 @@
 package com.flow.iptv;
 
 import android.content.Intent;
+import android.media.MediaPlayer;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -9,45 +11,65 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
 import android.widget.TextView;
+import android.widget.VideoView;
 import androidx.annotation.NonNull;
-import androidx.annotation.OptIn;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.media3.common.MediaItem;
-import androidx.media3.common.PlaybackException;
-import androidx.media3.common.Player;
-import androidx.media3.common.util.UnstableApi;
-import androidx.media3.exoplayer.DefaultLoadControl;
-import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
-import androidx.media3.datasource.DefaultHttpDataSource;
-import androidx.media3.ui.PlayerView;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import com.bumptech.glide.Glide;
 import java.util.Collections;
 import java.util.List;
 
-@OptIn(markerClass = UnstableApi.class)
 public class PlayerActivity extends AppCompatActivity {
 
-    private ExoPlayer player;
-    private PlayerView playerView;
+    private VideoView videoView;
     private TextView chName, chEpg;
     private View topOverlay, bottomOverlay;
     private List<Channel> channels;
     private int index;
     private RecyclerView switcher;
     private volatile boolean expired = false;
+
+    // Watchdog : détecte les flux bloqués (position ne progresse plus)
+    private int lastPosition = -1;
+    private int stallCount = 0;
     private int retryCount = 0;
+    private String currentUrl = null;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
+
     private final Runnable hideOverlays = () -> setOverlaysVisible(false);
+
+    private final Runnable watchdog = new Runnable() {
+        @Override public void run() {
+            if (videoView == null || currentUrl == null) return;
+            if (videoView.isPlaying()) {
+                int pos = videoView.getCurrentPosition();
+                if (pos == lastPosition) {
+                    stallCount++;
+                    // Après 2 contrôles consécutifs sans avancement (10s) → reconnecte
+                    if (stallCount >= 2) {
+                        stallCount = 0;
+                        reconnect();
+                        return;
+                    }
+                } else {
+                    stallCount = 0;
+                    retryCount = 0;
+                }
+                lastPosition = pos;
+            }
+            ui.postDelayed(this, 5_000);
+        }
+    };
+
     private final Runnable epgTick = new Runnable() {
         @Override public void run() {
             updateEpgLabel();
             ui.postDelayed(this, 30_000);
         }
     };
+
     private final Runnable subCheck = new Runnable() {
         @Override public void run() {
             checkSubscription();
@@ -60,15 +82,40 @@ public class PlayerActivity extends AppCompatActivity {
         super.onCreate(s);
         setContentView(R.layout.activity_player);
 
-        playerView = findViewById(R.id.player_view);
-        chName     = findViewById(R.id.ch_name);
-        chEpg      = findViewById(R.id.ch_epg);
-        topOverlay = findViewById(R.id.top_overlay);
+        videoView     = findViewById(R.id.player_view);
+        chName        = findViewById(R.id.ch_name);
+        chEpg         = findViewById(R.id.ch_epg);
+        topOverlay    = findViewById(R.id.top_overlay);
         bottomOverlay = findViewById(R.id.bottom_overlay);
 
-        buildPlayer();
+        videoView.setOnClickListener(v -> toggleOverlays());
 
-        playerView.setOnClickListener(v -> toggleOverlays());
+        // MediaPlayer natif : gère le MPEG-TS live sans re-sync A/V agressive
+        videoView.setOnPreparedListener(mp -> {
+            // Désactiver le looping (flux live infini)
+            mp.setLooping(false);
+            // Démarrer immédiatement
+            mp.start();
+            retryCount = 0;
+            stallCount = 0;
+            lastPosition = -1;
+            // Lancer le watchdog
+            ui.removeCallbacks(watchdog);
+            ui.postDelayed(watchdog, 5_000);
+        });
+
+        videoView.setOnErrorListener((mp, what, extra) -> {
+            // Reconnexion sur erreur avec backoff exponentiel
+            reconnect();
+            return true; // consommé, pas de dialog Android
+        });
+
+        videoView.setOnInfoListener((mp, what, extra) -> {
+            // MediaPlayer.MEDIA_INFO_BUFFERING_START = 701
+            // MediaPlayer.MEDIA_INFO_BUFFERING_END   = 702
+            // On ne fait rien de spécial — le MediaPlayer natif gère le buffer lui-même
+            return false;
+        });
 
         channels = ChannelHolder.get();
         index = getIntent().getIntExtra("index", -1);
@@ -94,72 +141,21 @@ public class PlayerActivity extends AppCompatActivity {
         scheduleHide();
     }
 
-    private void buildPlayer() {
-        // Buffer réduit pour IPTV live : démarre dès 1s en mémoire, max 8s
-        // Le buffer par défaut (50s) était la cause du "Mise en mémoire..." prolongé
-        DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(
-                        3_000,   // minBufferMs : tampon minimum maintenu
-                        10_000,  // maxBufferMs : tampon maximum
-                        1_000,   // bufferForPlaybackMs : démarre à 1s
-                        2_000    // bufferForPlaybackAfterRebufferMs
-                )
-                .build();
-
-        DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
-                .setConnectTimeoutMs(10_000)
-                .setReadTimeoutMs(15_000)
-                .setAllowCrossProtocolRedirects(true);
-
-        player = new ExoPlayer.Builder(this)
-                .setLoadControl(loadControl)
-                .setMediaSourceFactory(new DefaultMediaSourceFactory(httpFactory))
-                .build();
-
-        player.addListener(new Player.Listener() {
-            @Override
-            public void onPlayerError(@NonNull PlaybackException e) {
-                if (expired) return;
-                // Retry exponentiel : 2s, 4s, 8s, 8s max
-                long delay = Math.min(2_000L * (1L << Math.min(retryCount, 2)), 8_000L);
-                retryCount++;
-                ui.postDelayed(() -> {
-                    if (!isFinishing() && player != null) {
-                        player.prepare();
-                        player.play();
-                    }
-                }, delay);
-            }
-
-            @Override
-            public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_READY) {
-                    retryCount = 0;
-                }
-            }
-        });
-
-        playerView.setPlayer(player);
-    }
-
     private void startPlayback(int newIndex) {
         if (newIndex < 0 || newIndex >= channels.size()) return;
         if (expired) { redirectToDashboard(); return; }
         int oldIndex = index;
         index = newIndex;
         retryCount = 0;
+        stallCount = 0;
+        lastPosition = -1;
 
         Channel c = channels.get(index);
         setTitle(c.name);
         chName.setText(c.name);
         updateEpgLabel();
 
-        if (player != null) {
-            player.stop();
-            player.setMediaItem(MediaItem.fromUri(c.url));
-            player.prepare();
-            player.setPlayWhenReady(true);
-        }
+        play(c.url);
 
         if (switcher != null && switcher.getAdapter() != null) {
             if (oldIndex >= 0 && oldIndex < channels.size()) switcher.getAdapter().notifyItemChanged(oldIndex);
@@ -168,6 +164,27 @@ public class PlayerActivity extends AppCompatActivity {
         }
         scheduleHide();
         checkSubscription();
+    }
+
+    private void play(String url) {
+        currentUrl = url;
+        ui.removeCallbacks(watchdog);
+        videoView.stopPlayback();
+        videoView.setVideoURI(Uri.parse(url));
+        videoView.start();
+    }
+
+    private void reconnect() {
+        if (expired || currentUrl == null || isFinishing()) return;
+        // Backoff exponentiel : 2s → 4s → 8s (max)
+        long delay = Math.min(2_000L * (1L << Math.min(retryCount, 2)), 8_000L);
+        retryCount++;
+        ui.removeCallbacks(watchdog);
+        ui.postDelayed(() -> {
+            if (!isFinishing() && currentUrl != null && !expired) {
+                play(currentUrl);
+            }
+        }, delay);
     }
 
     private void setOverlaysVisible(boolean v) {
@@ -198,7 +215,9 @@ public class PlayerActivity extends AppCompatActivity {
 
     @Override protected void onResume() {
         super.onResume();
-        if (player != null) player.setPlayWhenReady(true);
+        if (currentUrl != null && !videoView.isPlaying()) {
+            play(currentUrl);
+        }
         ui.postDelayed(epgTick, 30_000);
         checkSubscription();
         ui.postDelayed(subCheck, 30_000);
@@ -206,18 +225,19 @@ public class PlayerActivity extends AppCompatActivity {
 
     @Override protected void onPause() {
         super.onPause();
-        if (player != null) player.setPlayWhenReady(false);
+        videoView.pause();
         ui.removeCallbacks(epgTick);
         ui.removeCallbacks(subCheck);
+        ui.removeCallbacks(watchdog);
     }
 
     @Override protected void onDestroy() {
         ui.removeCallbacks(hideOverlays);
         ui.removeCallbacks(epgTick);
         ui.removeCallbacks(subCheck);
-        if (player != null) {
-            player.release();
-            player = null;
+        ui.removeCallbacks(watchdog);
+        if (videoView != null) {
+            videoView.stopPlayback();
         }
         super.onDestroy();
     }
@@ -240,9 +260,10 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     private void redirectToDashboard() {
-        if (player != null) { try { player.stop(); } catch (Exception ignored) {} }
         ui.removeCallbacks(subCheck);
         ui.removeCallbacks(epgTick);
+        ui.removeCallbacks(watchdog);
+        if (videoView != null) { try { videoView.stopPlayback(); } catch (Exception ignored) {} }
         if (isFinishing()) return;
         View expiredOverlay = findViewById(R.id.expired_overlay);
         if (expiredOverlay != null) {
@@ -266,8 +287,8 @@ public class PlayerActivity extends AppCompatActivity {
         }
         @Override public void onBindViewHolder(@NonNull SVH h, int pos) {
             Channel c = channels.get(pos);
-            TextView name = h.itemView.findViewById(R.id.p_name);
-            TextView epg  = h.itemView.findViewById(R.id.p_epg);
+            TextView name  = h.itemView.findViewById(R.id.p_name);
+            TextView epg   = h.itemView.findViewById(R.id.p_epg);
             ImageView logo = h.itemView.findViewById(R.id.p_logo);
             name.setText(c.name);
             String label = EPGStore.get().currentLabel(c.tvgId);
