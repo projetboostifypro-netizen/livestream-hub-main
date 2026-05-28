@@ -1,11 +1,12 @@
-name: Build Android APK
+name: Build & Release APK
 
 on:
   push:
-    paths:
-      - 'android/**'
-      - '.github/workflows/android.yml'
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -16,7 +17,7 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle 8.7
@@ -26,40 +27,38 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        shell: bash
-        run: |
-          set -o pipefail
-          COMMAND="gradle assembleDebug --no-daemon --stacktrace --info --warning-mode all"
-          echo "Commande exécutée : $COMMAND"
-          echo "Dossier de travail : $(pwd)"
-          echo "Version Java :"
-          java -version
-          echo "Version Gradle :"
-          gradle --version
-          echo "Fichiers Android présents :"
-          ls -la
-          echo "Début des logs Gradle complets"
-          $COMMAND 2>&1 | tee ../gradle-build-full.log
+        run: gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee ../gradle-build.log
 
-      - name: Upload Gradle diagnostics on failure
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: gradle-diagnostics
           if-no-files-found: warn
           path: |
-            gradle-build-full.log
+            gradle-build.log
             android/app/build/reports/
-            android/build/reports/
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FlowIPTV-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+      # ----- Release avec bouton Télécharger -----
+      # On supprime le tag "latest" existant pour le recréer proprement
+      - name: Delete existing latest tag (if any)
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name  "GitHub Actions"
+          git tag -d latest 2>/dev/null || true
+          git push origin :refs/tags/latest 2>/dev/null || true
 
-      - name: Publish APK as a Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create / update Release "latest"
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: latest
+          name: "OnE+ — Dernière version"
+          body: |
+            ## Télécharger l'application OnE+
+
+            Cliquez sur **app-debug.apk** ci-dessous pour installer l'application sur Android.
+
+            > Compilé automatiquement depuis le dernier commit sur `main`.
+          prerelease: false
+          make_latest: true
           files: android/app/build/outputs/apk/debug/app-debug.apk
