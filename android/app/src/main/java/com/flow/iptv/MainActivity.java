@@ -423,7 +423,7 @@ public class MainActivity extends AppCompatActivity {
             TextView group = itemView.findViewById(R.id.hero_group);
             TextView letter = itemView.findViewById(R.id.hero_letter);
             ImageView logo = itemView.findViewById(R.id.hero_logo);
-            if (c == null) { name.setText("Bienvenue sur FLOW+"); group.setText(""); letter.setText("F"); logo.setVisibility(View.GONE); return; }
+            if (c == null) { name.setText("Bienvenue sur OnE+"); group.setText(""); letter.setText("F"); logo.setVisibility(View.GONE); return; }
             name.setText(c.name);
             String epg = EPGStore.get().currentLabel(c.tvgId);
             if (epg != null) group.setText(epg);

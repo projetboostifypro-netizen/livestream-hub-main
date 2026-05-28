@@ -47,7 +47,7 @@ public class EPGStore {
 
     private void download(File out) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(URL_XMLTV).openConnection();
-        c.setRequestProperty("User-Agent", "FLOW+/1.0");
+        c.setRequestProperty("User-Agent", "OnE+/1.0");
         c.setRequestProperty("Accept-Encoding", "gzip");
         c.setConnectTimeout(20000);
         c.setReadTimeout(60000);

@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 
 export const Route = createFileRoute("/login")({
-  head: () => ({ meta: [{ title: "Connexion — FLOW+" }] }),
+  head: () => ({ meta: [{ title: "Connexion — OnE+" }] }),
   component: LoginPage,
 });
 
@@ -26,7 +26,6 @@ function LoginPage() {
       toast.error(error?.message ?? "Connexion échouée");
       return;
     }
-    // Vérifie le rôle admin — accès web réservé aux admins
     const { data: roles } = await supabase
       .from("user_roles")
       .select("role")
@@ -44,15 +43,15 @@ function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4" style={{ background: "var(--gradient-surface)" }}>
+    <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4" style={{ background: "var(--gradient-surface)" }}>
       <Toaster theme="dark" position="top-right" />
       <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-[var(--shadow-card)]">
-        <div className="mb-8 flex justify-center"><Logo size={56} /></div>
+        <div className="mb-8 flex justify-center"><Logo size={72} /></div>
         <h1 className="text-2xl font-bold">Connexion administrateur</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Accès réservé aux administrateurs de FLOW+.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Accès réservé aux administrateurs de OnE+.</p>
         <div className="mt-4 flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 p-3 text-xs text-muted-foreground">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          <span>Les utilisateurs doivent se connecter depuis l'application Android FLOW+. Ce site est le tableau de bord administrateur.</span>
+          <span>Les utilisateurs doivent se connecter depuis l'application Android OnE+. Ce site est le tableau de bord administrateur.</span>
         </div>
         <form onSubmit={onSubmit} className="mt-6 space-y-4">
           <div>
@@ -68,6 +67,7 @@ function LoginPage() {
           </button>
         </form>
       </div>
+      <p className="mt-6 text-xs text-muted-foreground/60">Powered by arianetv</p>
     </div>
   );
 }

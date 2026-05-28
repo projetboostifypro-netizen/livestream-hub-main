@@ -1,14 +1,14 @@
-import logo from "@/assets/flow-logo.png";
+import logo from "@/assets/one-plus-logo.jpg";
 
 export function Logo({ size = 36 }: { size?: number }) {
   return (
     <div className="flex items-center gap-2">
       <img
         src={logo}
-        alt="FLOW+"
+        alt="OnE+"
         width={size}
         height={size}
-        className="object-contain"
+        className="object-contain rounded"
         style={{ width: size, height: size }}
       />
       <span
@@ -19,7 +19,7 @@ export function Logo({ size = 36 }: { size?: number }) {
           WebkitTextFillColor: "transparent",
         }}
       >
-        FLOW<span style={{ color: "var(--gold)", WebkitTextFillColor: "var(--gold)" }}>+</span>
+        OnE<span style={{ color: "var(--gold)", WebkitTextFillColor: "var(--gold)" }}>+</span>
       </span>
     </div>
   );
