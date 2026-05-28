@@ -7,41 +7,33 @@ interface PlayerProps {
   channelName?: string;
 }
 
+// ─── Constantes ─────────────────────────────────────────────────────────────
+const RECONNECT_INTERVAL_MS = 5_000;   // 5 s entre chaque tentative silencieuse
+const MAX_SILENT_RETRIES    = 12;      // ~60 s avant d'afficher l'erreur à l'utilisateur
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 function proxify(url: string) {
   return `/api/public/stream/${encodeURIComponent(btoa(url))}`;
 }
 
-// Xtream Codes: convert a live .ts URL to the HLS variant.
 function toHlsIfPossible(url: string): string {
   try {
     const u = new URL(url);
     const m = u.pathname.match(/^\/([^/]+)\/([^/]+)\/(\d+)\.ts$/i);
-    if (m) {
-      u.pathname = `/live/${m[1]}/${m[2]}/${m[3]}.m3u8`;
-      return u.toString();
-    }
+    if (m) { u.pathname = `/live/${m[1]}/${m[2]}/${m[3]}.m3u8`; return u.toString(); }
     return url;
-  } catch {
-    return url;
-  }
+  } catch { return url; }
 }
 
-// Revert HLS m3u8 back to original .ts URL (Xtream Codes pattern).
 function toTsIfPossible(url: string): string {
   try {
     const u = new URL(url);
     const m = u.pathname.match(/^\/live\/([^/]+)\/([^/]+)\/(\d+)\.m3u8$/i);
-    if (m) {
-      u.pathname = `/${m[1]}/${m[2]}/${m[3]}.ts`;
-      return u.toString();
-    }
+    if (m) { u.pathname = `/${m[1]}/${m[2]}/${m[3]}.ts`; return u.toString(); }
     return url;
-  } catch {
-    return url;
-  }
+  } catch { return url; }
 }
 
-// HEAD/GET probe through our proxy to check if the HLS variant actually serves.
 async function probeUrl(url: string, timeoutMs = 4000): Promise<boolean> {
   try {
     const ctrl = new AbortController();
@@ -50,22 +42,24 @@ async function probeUrl(url: string, timeoutMs = 4000): Promise<boolean> {
     clearTimeout(timer);
     if (!res.ok && res.status !== 206) return false;
     const ct = res.headers.get("content-type") || "";
-    // Accept HLS manifest content-types or anything non-empty 2xx
     return ct.includes("mpegurl") || ct.includes("application/") || ct.includes("text/") || res.status < 300;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-function toVlcIntent(url: string) {
-  return `vlc://${url}`;
-}
+function toVlcIntent(url: string) { return `vlc://${url}`; }
 
+// ─── Composant ───────────────────────────────────────────────────────────────
 export function Player({ streamUrl, channelName }: PlayerProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const playerRef = useRef<{ destroy: () => void } | null>(null);
-  const [status, setStatus] = useState<"idle" | "loading" | "playing" | "error">("idle");
+  const videoRef    = useRef<HTMLVideoElement>(null);
+  const playerRef   = useRef<{ destroy: () => void } | null>(null);
+  const retryCount  = useRef(0);
+  const retryTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const destroyed   = useRef(false);
+  const effectiveUrlRef = useRef<string>("");
+
+  const [status,   setStatus]   = useState<"idle" | "loading" | "playing" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string>("");
+
   const externalUrl = useMemo(() => (streamUrl ? toVlcIntent(streamUrl) : ""), [streamUrl]);
 
   const copyStreamUrl = async () => {
@@ -74,20 +68,143 @@ export function Player({ streamUrl, channelName }: PlayerProps) {
     toast.success("Lien du flux copié");
   };
 
-  useEffect(() => {
+  // ── Annule le timer de reconnexion en cours ────────────────────────────────
+  function clearRetry() {
+    if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null; }
+  }
+
+  // ── Détruit le lecteur actif ───────────────────────────────────────────────
+  function destroyPlayer() {
+    clearRetry();
+    if (playerRef.current) { playerRef.current.destroy(); playerRef.current = null; }
     const video = videoRef.current;
-    if (!video || !streamUrl) {
-      setStatus("idle");
+    if (video) { video.removeAttribute("src"); video.load(); }
+  }
+
+  // ── Planifie une reconnexion silencieuse dans 5 s ─────────────────────────
+  function scheduleReconnect() {
+    if (destroyed.current) return;
+    clearRetry();
+    retryCount.current += 1;
+    if (retryCount.current > MAX_SILENT_RETRIES) {
+      // Trop de tentatives → on affiche l'erreur
+      setStatus("error");
+      setErrorMsg("Signal indisponible après plusieurs tentatives. Vérifiez votre connexion ou réessayez plus tard.");
       return;
     }
+    // Reconnexion silencieuse : l'utilisateur voit toujours le lecteur, pas d'écran d'erreur
+    retryTimer.current = setTimeout(() => {
+      if (destroyed.current) return;
+      const video = videoRef.current;
+      if (!video || !effectiveUrlRef.current) return;
+      if (playerRef.current) { playerRef.current.destroy(); playerRef.current = null; }
+      video.removeAttribute("src");
+      video.load();
+      const lower = effectiveUrlRef.current.toLowerCase();
+      if (lower.includes(".m3u8")) {
+        void loadHls(effectiveUrlRef.current, video);
+      } else {
+        void playMpegTs(effectiveUrlRef.current, video);
+      }
+    }, RECONNECT_INTERVAL_MS);
+  }
 
+  // ── Charge un flux HLS ────────────────────────────────────────────────────
+  async function loadHls(url: string, video: HTMLVideoElement) {
+    const proxied = proxify(url);
+    const Hls = (await import("hls.js")).default;
+    if (destroyed.current) return;
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        fragLoadingMaxRetry: 3,
+        manifestLoadingMaxRetry: 3,
+        levelLoadingMaxRetry: 3,
+      });
+      hls.loadSource(proxied);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        retryCount.current = 0; // réinitialise le compteur de reconnexions
+        video.play().catch(() => {});
+      });
+      hls.on(Hls.Events.ERROR, async (_e, data) => {
+        if (!data.fatal || destroyed.current) return;
+        // Essai de fallback vers TS avant de planifier reconnexion
+        const tsUrl = toTsIfPossible(url);
+        if (tsUrl !== url) {
+          try { hls.destroy(); } catch { /* noop */ }
+          effectiveUrlRef.current = tsUrl;
+          await playMpegTs(tsUrl, video);
+          return;
+        }
+        try { hls.destroy(); } catch { /* noop */ }
+        playerRef.current = null;
+        scheduleReconnect(); // retry silencieux
+      });
+      playerRef.current = { destroy: () => hls.destroy() };
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = proxied;
+      video.play().catch(() => {});
+    }
+  }
+
+  // ── Charge un flux MPEG-TS ────────────────────────────────────────────────
+  async function playMpegTs(url: string, video: HTMLVideoElement) {
+    const mpegts = (await import("mpegts.js")).default;
+    if (destroyed.current) return;
+    mpegts.LoggingControl.enableError = false;
+    const proxied = proxify(url);
+    if (mpegts.getFeatureList().mseLivePlayback) {
+      const player = mpegts.createPlayer(
+        { type: "mpegts", isLive: true, url: proxied, cors: false },
+        { seekType: "param", enableStashBuffer: false, liveBufferLatencyChasing: true, lazyLoad: false },
+      );
+      player.attachMediaElement(video);
+      player.load();
+      const playResult = player.play() as void | Promise<void>;
+      if (playResult && typeof (playResult as Promise<void>).catch === "function") {
+        (playResult as Promise<void>).catch(() => {});
+      }
+      player.on(mpegts.Events.ERROR, (_type: string, _detail: string, info?: { code?: number }) => {
+        if (destroyed.current) return;
+        if (info?.code === 403) {
+          // 403 = refus serveur → inutile de retry, montrer l'erreur
+          setStatus("error");
+          setErrorMsg("Flux refusé par le fournisseur depuis cette connexion. Essayez le lecteur externe depuis votre appareil.");
+          return;
+        }
+        try { player.unload(); player.detachMediaElement(); player.destroy(); } catch { /* noop */ }
+        playerRef.current = null;
+        scheduleReconnect(); // retry silencieux
+      });
+      playerRef.current = {
+        destroy: () => {
+          try { player.unload(); player.detachMediaElement(); player.destroy(); } catch { /* noop */ }
+        },
+      };
+    } else {
+      video.src = proxied;
+      video.play().catch(() => {});
+    }
+  }
+
+  // ── Effet principal : lance la lecture à chaque changement de streamUrl ────
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !streamUrl) { setStatus("idle"); return; }
+
+    destroyed.current = false;
+    retryCount.current = 0;
+    destroyPlayer();
     setStatus("loading");
     setErrorMsg("");
+
     let cancelled = false;
 
     async function load() {
       try {
-        // Try HLS first if available; probe it; otherwise fall back to original TS.
+        // Déterminer l'URL effective (HLS ou TS)
         const hlsCandidate = toHlsIfPossible(streamUrl!);
         const hasHlsCandidate = hlsCandidate !== streamUrl;
         let effectiveUrl = streamUrl!;
@@ -96,166 +213,119 @@ export function Player({ streamUrl, channelName }: PlayerProps) {
           if (cancelled) return;
           effectiveUrl = ok ? hlsCandidate : toTsIfPossible(streamUrl!);
         } else if (streamUrl!.toLowerCase().includes(".m3u8")) {
-          // Already HLS — probe; fallback to TS equivalent if it fails.
           const ok = await probeUrl(streamUrl!);
           if (cancelled) return;
           if (!ok) effectiveUrl = toTsIfPossible(streamUrl!);
         }
-        const proxied = proxify(effectiveUrl);
-
-        if (playerRef.current) {
-          playerRef.current.destroy();
-          playerRef.current = null;
-        }
+        effectiveUrlRef.current = effectiveUrl;
 
         const lower = effectiveUrl.toLowerCase();
-        const isHls = lower.includes(".m3u8");
-
-        if (isHls) {
-          const Hls = (await import("hls.js")).default;
-          if (cancelled) return;
-          if (Hls.isSupported()) {
-            const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
-            hls.loadSource(proxied);
-            hls.attachMedia(video!);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => video!.play().catch(() => {}));
-            let fellBack = false;
-            hls.on(Hls.Events.ERROR, async (_e, data) => {
-              if (!data.fatal) return;
-              // Fallback: try original TS via mpegts.js
-              if (!fellBack) {
-                fellBack = true;
-                const tsUrl = toTsIfPossible(effectiveUrl);
-                if (tsUrl !== effectiveUrl) {
-                  try { hls.destroy(); } catch { /* noop */ }
-                  await playMpegTs(tsUrl);
-                  return;
-                }
-              }
-              setStatus("error");
-              setErrorMsg(data.details || "Erreur de lecture HLS");
-            });
-            playerRef.current = { destroy: () => hls.destroy() };
-          } else if (video!.canPlayType("application/vnd.apple.mpegurl")) {
-            video!.src = proxied;
-            video!.play().catch(() => {});
-          }
+        if (lower.includes(".m3u8")) {
+          await loadHls(effectiveUrl, video);
         } else {
-          await playMpegTs(effectiveUrl);
+          await playMpegTs(effectiveUrl, video);
         }
 
-        const onPlaying = () => setStatus("playing");
-        const onError = () => {
-          setStatus("error");
-          setErrorMsg("Impossible de charger ce flux");
+        const onPlaying = () => { retryCount.current = 0; setStatus("playing"); };
+        // Stall → reconnexion silencieuse automatique
+        const onStall = () => {
+          if (!destroyed.current && video.readyState < 3) scheduleReconnect();
         };
-        video!.addEventListener("playing", onPlaying);
-        video!.addEventListener("error", onError);
+        const onError = () => {
+          if (!destroyed.current) scheduleReconnect();
+        };
+        video.addEventListener("playing",  onPlaying);
+        video.addEventListener("stalled",  onStall);
+        video.addEventListener("error",    onError);
         return () => {
-          video!.removeEventListener("playing", onPlaying);
-          video!.removeEventListener("error", onError);
+          video.removeEventListener("playing",  onPlaying);
+          video.removeEventListener("stalled",  onStall);
+          video.removeEventListener("error",    onError);
         };
       } catch (err) {
-        setStatus("error");
-        setErrorMsg(err instanceof Error ? err.message : "Erreur inconnue");
-      }
-    }
-
-    async function playMpegTs(url: string) {
-      const mpegts = (await import("mpegts.js")).default;
-      if (cancelled) return;
-      mpegts.LoggingControl.enableError = false;
-      const proxied = proxify(url);
-      if (mpegts.getFeatureList().mseLivePlayback) {
-        const player = mpegts.createPlayer(
-          { type: "mpegts", isLive: true, url: proxied, cors: false },
-          { seekType: "param", enableStashBuffer: false, liveBufferLatencyChasing: true, lazyLoad: false },
-        );
-        player.attachMediaElement(video!);
-        player.load();
-        const playResult = player.play() as void | Promise<void>;
-        if (playResult && typeof (playResult as Promise<void>).catch === "function") {
-          (playResult as Promise<void>).catch(() => {});
-        }
-        player.on(mpegts.Events.ERROR, (type: string, detail: string, info?: { code?: number; msg?: string }) => {
-          setStatus("error");
-          setErrorMsg(
-            info?.code === 403
-              ? "Flux refusé par le fournisseur depuis cette connexion. Essayez le lecteur externe depuis votre appareil."
-              : `${type}: ${detail}`,
-          );
-        });
-        playerRef.current = {
-          destroy: () => {
-            try { player.unload(); player.detachMediaElement(); player.destroy(); } catch { /* noop */ }
-          },
-        };
-      } else {
-        video!.src = proxied;
-        video!.play().catch(() => {});
+        if (!cancelled) scheduleReconnect(); // même en cas d'exception, on retry
       }
     }
 
     const cleanupPromise = load();
     return () => {
       cancelled = true;
+      destroyed.current = true;
       cleanupPromise.then((fn) => fn && fn());
-      if (playerRef.current) {
-        playerRef.current.destroy();
-        playerRef.current = null;
-      }
-      if (video) {
-        video.removeAttribute("src");
-        video.load();
-      }
+      destroyPlayer();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamUrl]);
+
+  // ── Retry manuel (bouton) ─────────────────────────────────────────────────
+  function handleRetry() {
+    retryCount.current = 0;
+    setStatus("loading");
+    setErrorMsg("");
+    const video = videoRef.current;
+    if (!video || !effectiveUrlRef.current) return;
+    destroyPlayer();
+    destroyed.current = false;
+    const lower = effectiveUrlRef.current.toLowerCase();
+    if (lower.includes(".m3u8")) {
+      void loadHls(effectiveUrlRef.current, video);
+    } else {
+      void playMpegTs(effectiveUrlRef.current, video);
+    }
+  }
 
   return (
     <div className="relative aspect-video w-full overflow-hidden rounded-xl bg-black shadow-[var(--shadow-glow)]">
-      <video
-        ref={videoRef}
-        controls
-        autoPlay
-        playsInline
-        className="h-full w-full"
-      />
+      <video ref={videoRef} controls autoPlay playsInline className="h-full w-full" />
+
       {status === "idle" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
           <div className="text-6xl">📺</div>
           <p className="mt-3 text-sm">Sélectionnez une chaîne pour commencer</p>
         </div>
       )}
+
       {status === "loading" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 text-foreground">
           <Loader2 className="h-10 w-10 animate-spin text-primary" />
           <p className="mt-3 text-sm">Chargement {channelName ? `· ${channelName}` : ""}…</p>
         </div>
       )}
+
       {status === "error" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 px-4 text-center">
           <AlertCircle className="h-10 w-10 text-destructive" />
           <p className="mt-3 text-sm font-medium">Lecture impossible</p>
           <p className="mt-1 max-w-md text-xs text-muted-foreground">{errorMsg}</p>
-          {streamUrl && (
-            <div className="mt-4 flex flex-wrap justify-center gap-2">
-              <a
-                href={externalUrl}
-                className="inline-flex items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2 text-xs font-medium text-foreground transition hover:bg-accent"
-              >
-                <ExternalLink className="h-4 w-4" />
-                Ouvrir dans VLC
-              </a>
-              <button
-                type="button"
-                onClick={copyStreamUrl}
-                className="inline-flex items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2 text-xs font-medium text-foreground transition hover:bg-accent"
-              >
-                <Copy className="h-4 w-4" />
-                Copier le lien
-              </button>
-            </div>
-          )}
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            <button
+              type="button"
+              onClick={handleRetry}
+              className="inline-flex items-center gap-2 rounded-lg border border-primary bg-primary/20 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-primary/30"
+            >
+              <Loader2 className="h-4 w-4" />
+              Réessayer
+            </button>
+            {streamUrl && (
+              <>
+                <a
+                  href={externalUrl}
+                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2 text-xs font-medium text-foreground transition hover:bg-accent"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  Ouvrir dans VLC
+                </a>
+                <button
+                  type="button"
+                  onClick={copyStreamUrl}
+                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2 text-xs font-medium text-foreground transition hover:bg-accent"
+                >
+                  <Copy className="h-4 w-4" />
+                  Copier le lien
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>
