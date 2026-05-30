@@ -50,6 +50,14 @@ public class MainActivity extends AppCompatActivity {
     private String currentQuery = "";
     private String currentGroup = CHIP_ALL;
     private Channel featured;
+    private boolean hadActiveSub = false;
+    private final Handler subPoller = new Handler(Looper.getMainLooper());
+    private final Runnable subPollTick = new Runnable() {
+        @Override public void run() {
+            refreshAccountStatus();
+            subPoller.postDelayed(this, 10_000L);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle s) {
@@ -165,6 +173,16 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         if (accountStatus != null) refreshAccountStatus();
+        // Poll toutes les 10s pour détecter un achat d'abonnement sans
+        // que l'utilisateur ait à fermer / rouvrir l'app.
+        subPoller.removeCallbacks(subPollTick);
+        subPoller.postDelayed(subPollTick, 10_000L);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        subPoller.removeCallbacks(subPollTick);
     }
 
     private void refreshAccountStatus() {
@@ -199,12 +217,23 @@ public class MainActivity extends AppCompatActivity {
                 int coins = prof.length() > 0 ? prof.getJSONObject(0).optInt("coins", 0) : 0;
                 JSONArray subs = c.rpcArray("get_active_subscription", null);
                 String sub = "Aucun abonnement";
+                boolean nowActive = false;
                 if (subs.length() > 0) {
                     long sec = subs.getJSONObject(0).optLong("seconds_remaining", 0);
                     sub = formatDuration(sec) + " restant";
+                    nowActive = sec > 0;
                 }
                 String text = c.userEmail() + "  ·  " + coins + " FCFA  ·  " + sub;
-                runOnUiThread(() -> accountStatus.setText(text));
+                final boolean justActivated = nowActive && !hadActiveSub;
+                hadActiveSub = nowActive;
+                runOnUiThread(() -> {
+                    accountStatus.setText(text);
+                    if (justActivated) {
+                        // Un abonnement vient d'être détecté → recharge la playlist.
+                        Toast.makeText(this, "Abonnement actif détecté", Toast.LENGTH_SHORT).show();
+                        loadPlaylist(true);
+                    }
+                });
             } catch (Exception e) {
                 runOnUiThread(() -> accountStatus.setText(c.userEmail() + " · " + e.getMessage()));
             }
@@ -219,23 +248,28 @@ public class MainActivity extends AppCompatActivity {
         return m + "min";
     }
 
+    // Playlist Xtream intégrée (5 personnes en simultané)
+    private static final String XTREAM_USER = "N49R54G4";
+    private static final String XTREAM_PASS = "82460316";
+    private static final String XTREAM_HOST = "http://70726001.www.flywaytv.cc";
+    private static final String XTREAM_URL  =
+        XTREAM_HOST + "/get.php?username=" + XTREAM_USER + "&password=" + XTREAM_PASS + "&type=m3u_plus&output=ts";
+
     private void loadPlaylist(boolean showLoading) {
         if (showLoading) status.setText("Chargement…");
         new Thread(() -> {
             try {
-                // Récupère le lien M3U personnel de l'utilisateur (assigné via son abonnement).
-                String url = SupabaseClient.get(this).rpcScalar("get_my_playlist_url", null);
+                // 1. Essaie d'abord l'URL Supabase (abonnement actif de l'utilisateur).
+                String url = null;
+                try {
+                    url = SupabaseClient.get(this).rpcScalar("get_my_playlist_url", null);
+                } catch (Exception ignored) {}
+
+                // 2. Si pas d'URL Supabase, utilise la playlist Xtream intégrée.
                 if (url == null || url.isEmpty()) {
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        all.clear();
-                        topGroups.clear();
-                        featured = null;
-                        buildChips();
-                        render();
-                        status.setText("Aucun abonnement actif. Souscrivez à un plan pour accéder aux chaînes.");
-                    });
-                    return;
+                    url = XTREAM_URL;
                 }
+
                 String text = PlaylistParser.fetchRawSmart(url);
                 PlaylistParser.saveCache(getFilesDir(), text);
                 List<Channel> data = PlaylistParser.parse(text);
@@ -423,7 +457,7 @@ public class MainActivity extends AppCompatActivity {
             TextView group = itemView.findViewById(R.id.hero_group);
             TextView letter = itemView.findViewById(R.id.hero_letter);
             ImageView logo = itemView.findViewById(R.id.hero_logo);
-            if (c == null) { name.setText("Bienvenue sur OnE+"); group.setText(""); letter.setText("F"); logo.setVisibility(View.GONE); return; }
+            if (c == null) { name.setText("Bienvenue sur OnE+"); group.setText(""); letter.setText("O"); logo.setVisibility(View.GONE); return; }
             name.setText(c.name);
             String epg = EPGStore.get().currentLabel(c.tvgId);
             if (epg != null) group.setText(epg);
